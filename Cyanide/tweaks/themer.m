@@ -31,7 +31,7 @@ typedef struct {
 static const int    kThemerMaxCache    = 512;
 static const int    kThemerMaxIconBundleCache = 512;
 static const size_t kThemerMaxPngBytes = 1 << 18;   // 256 KB hard cap per icon
-static const NSUInteger kThemerBulkModelGraftCap = 128;
+static const NSUInteger kThemerBulkModelGraftCap = 512;
 static const uint32_t kThemerApplySettleUS = 0;
 static const bool kThemerDetailedIconLogs = false;
 
@@ -816,8 +816,12 @@ static bool themer_prefers_view_level_overlay(const char *bundle)
 static bool themer_needs_visible_push(const char *bundle)
 {
     (void)bundle;
-    // Keep SnowBoard Lite on the model/cache path. The visible setter path can
-    // draw an extra image layer above SpringBoard's own rounded icon mask.
+    // Cyanide-Enhanced: on iOS 17/18 the bulk model graft was capped at 128
+    // entries, so themes with more icons fell back to the per-view path -- but
+    // the visible setters (rung 2/3/4) were never enabled, leaving only 2-3
+    // icons themed. Re-enable the legacy visible push below iOS 26.
+    int major = themer_host_ios_major();
+    if (major > 0 && major < 26) return true;
     return false;
 }
 
