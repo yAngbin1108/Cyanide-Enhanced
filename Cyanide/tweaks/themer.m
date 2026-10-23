@@ -31,7 +31,7 @@ typedef struct {
 static const int    kThemerMaxCache    = 512;
 static const int    kThemerMaxIconBundleCache = 512;
 static const size_t kThemerMaxPngBytes = 1 << 18;   // 256 KB hard cap per icon
-static const NSUInteger kThemerBulkModelGraftCap = 2048;
+static const NSUInteger kThemerBulkModelGraftCap = 128;
 static const uint32_t kThemerApplySettleUS = 0;
 static const bool kThemerDetailedIconLogs = false;
 
@@ -816,9 +816,11 @@ static bool themer_prefers_view_level_overlay(const char *bundle)
 static bool themer_needs_visible_push(const char *bundle)
 {
     (void)bundle;
-    // Cyanide-Enhanced: on iOS 17/18 the bulk model graft was capped at 128
-    // entries and the visible setters (rung 2/3/4) were never enabled, so only
-    // 2-3 icons ever stuck. Enable the legacy visible push below iOS 26.
+    // Cyanide-Enhanced: upstream returns false here, which leaves iOS 17/18
+    // with no working path at all -- the bulk model graft is capped at 128
+    // theme entries and the visible setters (rung 2/3/4) were never enabled,
+    // so a full-set theme only ever themed 2-3 icons. Enable the legacy
+    // visible push below iOS 26; iOS 26 keeps the overrideImage pipeline.
     int major = themer_host_ios_major();
     if (major > 0 && major < 26) return true;
     return false;
@@ -2084,16 +2086,6 @@ static int themer_graft_icon_models_for_theme(NSDictionary<NSString *, NSData *>
         NSData *pngBytes = dataByBundle[key];
         if (![pngBytes isKindOfClass:NSData.class] || pngBytes.length == 0) continue;
 
-        // Cyanide-Enhanced: resolve the icon model first. Themes are often
-        // "full set" bundles with hundreds of apps the user does not have
-        // installed; building a remote UIImage for each of those wasted
-        // seconds per apply and blew the image cache. Bail out early instead.
-        uint64_t icon = themer_lookup_model_icon_for_bundle(bundle);
-        if (!r_is_objc_ptr(icon)) {
-            modelMisses++;
-            continue;
-        }
-
         uint64_t image = themer_lookup_cached(bundle);
         if (!image) {
             NSData *uploadBytes = themer_rounded_png_data(pngBytes, bundle);
@@ -2103,6 +2095,12 @@ static int themer_graft_icon_models_for_theme(NSDictionary<NSString *, NSData *>
                 continue;
             }
             themer_cache_image(bundle, image);
+        }
+
+        uint64_t icon = themer_lookup_model_icon_for_bundle(bundle);
+        if (!r_is_objc_ptr(icon)) {
+            modelMisses++;
+            continue;
         }
 
         ThemerEntry *entry = themer_lookup_entry(bundle);
