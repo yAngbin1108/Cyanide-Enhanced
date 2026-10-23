@@ -687,8 +687,19 @@ static uint64_t themer_build_remote_uiimage_from_data(NSData *bytes, const char 
     r_msg2(nsdata, "release", 0, 0, 0, 0);
 
     if (!r_is_objc_ptr(image)) {
-        printf("[THEMER] UIImage decode failed for %s (PNG malformed?)\n",
-               label ?: "?");
+        const unsigned char *b = (const unsigned char *)bytes.bytes;
+        size_t bl = bytes.length;
+        printf("[THEMER] UIImage decode failed for %s len=%lu remoteBuf=0x%llx "
+               "nsdata=0x%llx img=0x%llx head=%02x%02x%02x%02x%02x%02x%02x%02x "
+               "tail=%02x%02x%02x%02x\n",
+               label ?: "?", (unsigned long)bl,
+               (unsigned long long)remoteBuf, (unsigned long long)nsdata,
+               (unsigned long long)image,
+               bl > 0 ? b[0] : 0, bl > 1 ? b[1] : 0, bl > 2 ? b[2] : 0,
+               bl > 3 ? b[3] : 0, bl > 4 ? b[4] : 0, bl > 5 ? b[5] : 0,
+               bl > 6 ? b[6] : 0, bl > 7 ? b[7] : 0,
+               bl > 4 ? b[bl-4] : 0, bl > 3 ? b[bl-3] : 0,
+               bl > 2 ? b[bl-2] : 0, bl > 1 ? b[bl-1] : 0);
         return 0;
     }
     return image;
