@@ -15,6 +15,7 @@
 #import <stdio.h>
 #import <string.h>
 #import <time.h>
+#import <unistd.h>
 
 typedef struct {
     char bundle[128];
@@ -636,6 +637,89 @@ static int themer_seed_iconservices_cache(const char *bundle,
 
 // Ships PNG bytes into SB and returns a retained SB UIImage* (+1 owned by
 // caller). `label` is just for log output (e.g. "com.apple.mobilesafari").
+
+// Cyanide-Enhanced: stage the PNG on disk and hand SpringBoard a path instead of
+// malloc()ing inside its heap and copying the bytes across the kernel. On iOS
+// 17.5.1 that remote malloc/write path produced an NSData whose UIImage decode
+// returned nil for ~95% of icons (3ms per failure -- far too fast for a real
+// decode), so the theme only ever landed on 2-4 icons. A path is a 30-byte
+// argument and lets SpringBoard read the file through its own I/O.
+static const char *const kCndStagingDirs[] = {
+    "/var/tmp/.cyanide-icons",
+    "/var/mobile/Library/Caches/.cyanide-icons",
+    "/var/mobile/Media/.cyanide-icons",
+};
+static int gCndStagingGood = -1;   // index that worked, -1 = none yet
+
+static NSString *themer_staging_path(int dirIndex, const char *label)
+{
+    NSString *safe = [NSString stringWithUTF8String:(label && label[0]) ? label : "icon"];
+    NSMutableString *clean = [NSMutableString stringWithCapacity:safe.length];
+    for (NSUInteger i = 0; i < safe.length; i++) {
+        unichar c = [safe characterAtIndex:i];
+        BOOL ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                  (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '_';
+        [clean appendString:(ok ? [NSString stringWithFormat:@"%C", c] : @"_")];
+    }
+    return [@([NSString stringWithUTF8String:kCndStagingDirs[dirIndex])
+        stringByAppendingPathComponent:clean];
+}
+
+static uint64_t themer_build_remote_uiimage_via_file(NSData *bytes, const char *label)
+{
+    if (!bytes || bytes.length == 0) return 0;
+
+    NSFileManager *fm = NSFileManager.defaultManager;
+    const int count = (int)(sizeof(kCndStagingDirs) / sizeof(kCndStagingDirs[0]));
+    int first = (gCndStagingGood >= 0) ? gCndStagingGood : 0;
+
+    for (int n = 0; n < count; n++) {
+        int dirIndex = (first + n) % count;
+        NSString *dir = [NSString stringWithUTF8String:kCndStagingDirs[dirIndex]];
+
+        if (![fm fileExistsAtPath:dir]) {
+            if (![fm createDirectoryAtPath:dir withIntermediateDirectories:YES
+                                attributes:@{NSFilePosixPermissions: @0777} error:nil]) {
+                continue;
+            }
+        }
+
+        NSString *path = themer_staging_path(dirIndex, label);
+        if (![bytes writeToFile:path options:NSDataWritingAtomic error:nil]) continue;
+        chmod(path.fileSystemRepresentation, 0644);
+
+        uint64_t UIImageCls = r_class("UIImage");
+        if (!r_is_objc_ptr(UIImageCls)) return 0;
+        uint64_t pathStr = r_alloc_str(path.fileSystemRepresentation);
+        if (!r_is_objc_ptr(pathStr)) return 0;
+
+        uint64_t image = r_msg2(UIImageCls, "imageWithContentsOfFile:", pathStr, 0, 0, 0);
+        if (r_is_objc_ptr(image)) r_msg2(image, "retain", 0, 0, 0, 0);
+        r_free(pathStr);
+
+        if (!r_is_objc_ptr(image)) {
+            // The file exists and is readable to us but SpringBoard still cannot
+            // open it -> that directory is outside its sandbox. Try the next one.
+            static bool warned = false;
+            if (!warned) {
+                warned = true;
+                printf("[THEMER] staging dir rejected by SpringBoard: %s "
+                       "(ours_readable=%d) -- trying next candidate\n",
+                       dir.UTF8String, [fm isReadableFileAtPath:path]);
+            }
+            continue;
+        }
+
+        if (gCndStagingGood != dirIndex) {
+            gCndStagingGood = dirIndex;
+            printf("[THEMER] icon staging active: %s (bypasses remote malloc)\n",
+                   dir.UTF8String);
+        }
+        return image;
+    }
+    return 0;
+}
+
 static uint64_t themer_build_remote_uiimage_from_data(NSData *bytes, const char *label)
 {
     if (!bytes || bytes.length == 0 || bytes.length > kThemerMaxPngBytes) {
@@ -644,6 +728,15 @@ static uint64_t themer_build_remote_uiimage_from_data(NSData *bytes, const char 
                (unsigned long)bytes.length,
                kThemerMaxPngBytes);
         return 0;
+    }
+
+    uint64_t staged = themer_build_remote_uiimage_via_file(bytes, label);
+    if (staged) return staged;
+
+    static bool fellBack = false;
+    if (!fellBack) {
+        fellBack = true;
+        printf("[THEMER] no staging dir usable, falling back to remote malloc\n");
     }
 
     uint64_t remoteBuf = r_dlsym_call(R_TIMEOUT, "malloc",
